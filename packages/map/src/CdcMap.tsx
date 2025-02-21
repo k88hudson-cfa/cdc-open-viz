@@ -1273,6 +1273,11 @@ const CdcMap = ({
       throw Error('Blank string passed as URL. Navigation aborted.')
     }
 
+    if (urlString.startsWith('#')) {
+      window.location.hash = urlString
+      return
+    }
+
     const urlObj = new URL(urlString, window.location.origin)
 
     // Open constructed link in new tab/window
