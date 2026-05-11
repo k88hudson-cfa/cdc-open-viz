@@ -221,7 +221,7 @@ const CdcMapComponent: React.FC<CdcMapComponent> = ({
     const hashFilters = hashObj(config.filters)
     let filters: VizFilter[]
 
-    if (config.filters && (config || hashFilters !== runtimeFilters.fromHash)) {
+    if (config.filters && hashFilters !== runtimeFilters?.fromHash) {
       filters = generateRuntimeFilters({ ...config, data: configObj.data }, hashFilters, runtimeFilters)
 
       if (filters) {
