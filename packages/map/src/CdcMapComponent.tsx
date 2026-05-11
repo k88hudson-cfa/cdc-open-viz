@@ -283,8 +283,24 @@ const CdcMapComponent: React.FC<CdcMapComponent> = ({
     }
   }, [config, configObj.data])
 
+  // Tracks the runtimeData reference the current legend was built from. The
+  // legend hash alone (config + filters) doesn't include data identity, so we
+  // need this to detect "data finished loading" even when config/filters are
+  // unchanged. Without it, the first run of this effect can populate the
+  // legend from an empty initial runtimeData and the hash guard would then
+  // refuse to refresh once real data arrives.
+  const lastLegendDataRef = useRef<typeof runtimeData | null>(null)
+
   useEffect(() => {
+    // Skip when nothing legend-relevant changed. generateRuntimeLegend walks
+    // the full dataset and rebuilds the bin map — without this guard, every
+    // runtimeData / runtimeFilters churn fires it even when the resulting
+    // legend would be identical.
     const hashLegend = generateRuntimeLegendHash(config, runtimeFilters)
+    const hasItems = !!runtimeLegend && 'items' in runtimeLegend && runtimeLegend.items.length > 0
+    if (hashLegend === runtimeLegend?.fromHash && lastLegendDataRef.current === runtimeData && hasItems) {
+      return
+    }
     const legend = generateRuntimeLegend(
       {
         ...config,
@@ -299,6 +315,7 @@ const CdcMapComponent: React.FC<CdcMapComponent> = ({
       legendSpecialClassLastMemo
     )
     dispatch({ type: 'SET_RUNTIME_LEGEND', payload: legend })
+    lastLegendDataRef.current = runtimeData
   }, [runtimeData, config, runtimeFilters])
 
   useEffect(() => {
