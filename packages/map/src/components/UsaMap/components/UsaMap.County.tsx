@@ -356,7 +356,7 @@ const CountyMap = () => {
   // One Path2D set per focus state — built lazily, retained across focus
   // changes so reset zoom (focused → full US) and state revisits become
   // O(map lookup) instead of re-projecting every feature. Invalidated
-  // together when topology / canvas size changes.
+  // together when topology / canvas size / showNeighbors changes.
   // `currentFocus` is the focus the shared projection is configured for;
   // color-only redraws skip projection setup when it matches.
   const pathCacheStoreRef = useRef<{
@@ -372,6 +372,25 @@ const CountyMap = () => {
 
   const runtimeKeys = runtimeData ? Object.keys(runtimeData) : []
   const lineWidth = 1
+
+  // Resolve each row's legend colors once per data/legend change instead of
+  // on every zoom/pan frame. applyLegendToRow JSON.stringifies the row and
+  // runs three chroma color ops, so per-frame iteration was eating frame budget.
+  const geoLegendCache = useMemo(() => {
+    const cache = new Map<string, string[]>()
+    if (!runtimeData || !runtimeLegend?.items?.length) return cache
+    for (const geoId in runtimeData) {
+      const values = applyLegendToRow(runtimeData[geoId], config, runtimeLegend, legendMemo, legendSpecialClassLastMemo)
+      if (values) cache.set(geoId, values)
+    }
+    return cache
+  }, [
+    runtimeData,
+    runtimeLegend,
+    config.general?.type,
+    config.general?.palette?.name,
+    config.legend?.showSpecialClassesLast
+  ])
 
   // Set of HSA group IDs that contain at least one county in the focused
   // state. Lets the HSA loop skip out-of-state HSAs when zoomed in.
@@ -464,14 +483,10 @@ const CountyMap = () => {
     path2d: Path2D,
     geoData,
     canvasWidth: number,
+    legendValues: string[] | null,
     strokeWidth?: number,
     strokeColor?: string
   ) => {
-    const legendValues =
-      geoData !== undefined
-        ? applyLegendToRow(geoData, config, runtimeLegend, legendMemo, legendSpecialClassLastMemo)
-        : false
-
     const baseFill =
       legendValues && config.general.type !== 'us-geocode'
         ? legendValues[0] === '#000000'
@@ -744,13 +759,7 @@ const CountyMap = () => {
 
         // If the hovered county is found, show the tooltip for that county, otherwise hide the tooltip
         if (county && runtimeData[county.id]) {
-          const legendValues = applyLegendToRow(
-            runtimeData[county.id],
-            config,
-            runtimeLegend,
-            legendMemo,
-            legendSpecialClassLastMemo
-          )
+          const legendValues = geoLegendCache.get(county.id) ?? null
           if (legendValues) {
             if (legendValues[0] === '#000000') {
               context.restore()
@@ -1015,17 +1024,19 @@ const CountyMap = () => {
       if (!path2d) return
 
       const geoData = runtimeData[geo.id]
+      const legendValues = geoLegendCache.get(geo.id) ?? null
       if (!config.general.showHSABoundaries && filteredCountyCode && geo.id === filteredCountyCode) {
         countyHighlight = {
           context,
           path2d,
           geoData,
           canvasWidth: canvas.width,
+          legendValues,
           strokeWidth: 2,
           strokeColor: '#000000'
         }
       }
-      paintCountyGeo(context, path2d, geoData, canvas.width, countyStrokeWidth, countyStrokeColor)
+      paintCountyGeo(context, path2d, geoData, canvas.width, legendValues, countyStrokeWidth, countyStrokeColor)
     })
 
     let hsaHighlight = null
@@ -1147,8 +1158,8 @@ const CountyMap = () => {
 
     // Highlight county last so it is visible on top of all other layers
     if (countyHighlight) {
-      const { context, path2d, geoData, canvasWidth, strokeWidth, strokeColor } = countyHighlight
-      paintCountyGeo(context, path2d, geoData, canvasWidth, strokeWidth, strokeColor)
+      const { context, path2d, geoData, canvasWidth, legendValues, strokeWidth, strokeColor } = countyHighlight
+      paintCountyGeo(context, path2d, geoData, canvasWidth, legendValues, strokeWidth, strokeColor)
     }
     // Highlight HSA boundary if applicable
     if (hsaHighlight) {
