@@ -373,6 +373,17 @@ const CountyMap = () => {
   const runtimeKeys = runtimeData ? Object.keys(runtimeData) : []
   const lineWidth = 1
 
+  // Set of HSA group IDs that contain at least one county in the focused
+  // state. Lets the HSA loop skip out-of-state HSAs when zoomed in.
+  const focusedHsaGroups = useMemo(() => {
+    if (!focus.id || !topoData?.hsaMapping) return null
+    const groups = new Set<string>()
+    for (const countyFips in topoData.hsaMapping) {
+      if (countyFips.indexOf(focus.id) === 0) groups.add(topoData.hsaMapping[countyFips])
+    }
+    return groups
+  }, [focus.id, topoData?.hsaMapping])
+
   // Identifies the cache scope (everything that affects projected pixel
   // coords besides focus). When this string changes, every per-focus cache
   // is invalidated together.
@@ -384,25 +395,37 @@ const CountyMap = () => {
       topoData.hsas?.length || 0,
       canvas.clientWidth,
       config.general.showHSABoundaries ? 'hsa' : 'county',
+      config.general.showNeighboringStates ? 'neighbors' : 'focus-only',
       territoryVisibility.key
     ].join('|')
 
-  // Pre-compute Path2D objects for all geo features — avoids expensive geoPath projection on every zoom frame
+  // Pre-compute Path2D objects for visible geo features. d3's projection over
+  // every coordinate is the dominant cost on focus change, so when zoomed
+  // into a state we skip projecting the ~95% of features that fall off-canvas.
   const buildPathCache = () => {
     const pathGen = geoPath(topoData.projection)
     const cache = new Map<string, Path2D>()
+    const onlyFocusState = focus.id && !config.general.showNeighboringStates
+    const onlyFocusHsas = !!focus.id
+
     topoData.mapData.forEach(geo => {
       if (!geo.id) return
+      if (onlyFocusState) {
+        if (geo.id.length === 2 && geo.id !== focus.id) return
+        if (geo.id.length > 2 && geo.id.indexOf(focus.id) !== 0) return
+      }
       const d = pathGen(geo)
       if (d) cache.set(geo.id, new Path2D(d))
     })
     topoData.states.forEach(state => {
       if (!state.id) return
+      if (onlyFocusState && state.id !== focus.id) return
       const d = pathGen(state)
       if (d) cache.set('state_border_' + state.id, new Path2D(d))
     })
     topoData.hsas.forEach(hsa => {
       if (!hsa?.groupId || !hsa?.feature) return
+      if (onlyFocusHsas && !focusedHsaGroups?.has(hsa.groupId)) return
       const d = pathGen(hsa.feature as any)
       if (d) cache.set('hsa_border_' + hsa.groupId, new Path2D(d))
     })
@@ -977,11 +1000,15 @@ const CountyMap = () => {
 
     // Iterates through each state/county topo and renders it using cached Path2D
     let countyHighlight = null
+    const skipNonFocusGeos = !config.general.showNeighboringStates && !!focus.id
     topoData.mapData.forEach(geo => {
       if (!geo.id) return
-      const hideCounty =
-        !config.general.showNeighboringStates && focus.id && geo.id.length > 2 && geo.id.indexOf(focus.id) !== 0
-      if (hideCounty) return
+      if (skipNonFocusGeos) {
+        // County in another state — skip
+        if (geo.id.length > 2 && geo.id.indexOf(focus.id) !== 0) return
+        // State-shaped fill that isn't the focused state — covered by counties anyway
+        if (geo.id.length === 2 && geo.id !== focus.id) return
+      }
       if (!focus.id && config.general.type === 'us-geocode' && geo.id.length > 2) return
 
       const path2d = cache.get(geo.id)
@@ -1008,6 +1035,7 @@ const CountyMap = () => {
 
       topoData.hsas.forEach(hsa => {
         if (!hsa?.groupId) return
+        if (focusedHsaGroups && !focusedHsaGroups.has(hsa.groupId)) return
         const cacheKey = 'hsa_border_' + hsa.groupId
         const path2d = cache.get(cacheKey)
         if (path2d) {
@@ -1026,6 +1054,7 @@ const CountyMap = () => {
     topoData.states.forEach(state => {
       if (config.migrations.showPuertoRico == false) return
       if (!state.id) return
+      if (skipNonFocusGeos && state.id !== focus.id) return
       const path2d = cache.get('state_border_' + state.id)
       if (path2d) {
         context.stroke(path2d)
