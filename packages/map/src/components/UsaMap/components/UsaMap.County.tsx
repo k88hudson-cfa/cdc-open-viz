@@ -296,7 +296,8 @@ const CountyMap = () => {
         context.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height)
       }
       geoPathCacheRef.current.clear()
-      geoPathCacheKeyRef.current = ''
+      pathCacheStoreRef.current.caches.clear()
+      pathCacheStoreRef.current.currentFocus = null
       setTopoData(response)
     })
   }
@@ -352,7 +353,17 @@ const CountyMap = () => {
   const zoomBehaviorRef = useRef()
   const zoomFrameRef = useRef<number | null>(null)
   const geoPathCacheRef = useRef<Map<string, Path2D>>(new Map())
-  const geoPathCacheKeyRef = useRef('')
+  // One Path2D set per focus state — built lazily, retained across focus
+  // changes so reset zoom (focused → full US) and state revisits become
+  // O(map lookup) instead of re-projecting every feature. Invalidated
+  // together when topology / canvas size changes.
+  // `currentFocus` is the focus the shared projection is configured for;
+  // color-only redraws skip projection setup when it matches.
+  const pathCacheStoreRef = useRef<{
+    cacheKey: string
+    currentFocus: string | null
+    caches: Map<string, Map<string, Path2D>>
+  }>({ cacheKey: '', currentFocus: null, caches: new Map() })
 
   // Clear pattern cache when pattern configuration changes
   useEffect(() => {
@@ -362,20 +373,22 @@ const CountyMap = () => {
   const runtimeKeys = runtimeData ? Object.keys(runtimeData) : []
   const lineWidth = 1
 
-  const getPathCacheKey = (canvas: HTMLCanvasElement) =>
+  // Identifies the cache scope (everything that affects projected pixel
+  // coords besides focus). When this string changes, every per-focus cache
+  // is invalidated together.
+  const getPathCacheScopeKey = (canvas: HTMLCanvasElement) =>
     [
       topoData.year,
       topoData.mapData?.length || 0,
       topoData.states?.length || 0,
       topoData.hsas?.length || 0,
-      focus.id || '',
       canvas.clientWidth,
       config.general.showHSABoundaries ? 'hsa' : 'county',
       territoryVisibility.key
     ].join('|')
 
   // Pre-compute Path2D objects for all geo features — avoids expensive geoPath projection on every zoom frame
-  const buildPathCache = (cacheKey: string) => {
+  const buildPathCache = () => {
     const pathGen = geoPath(topoData.projection)
     const cache = new Map<string, Path2D>()
     topoData.mapData.forEach(geo => {
@@ -393,9 +406,7 @@ const CountyMap = () => {
       const d = pathGen(hsa.feature as any)
       if (d) cache.set('hsa_border_' + hsa.groupId, new Path2D(d))
     })
-    geoPathCacheRef.current.clear()
     geoPathCacheRef.current = cache
-    geoPathCacheKeyRef.current = cacheKey
   }
 
   const resetZoomTransform = () => {
@@ -895,21 +906,40 @@ const CountyMap = () => {
       if (canvas.width !== canvasWidth) canvas.width = canvasWidth
       if (canvas.height !== canvasHeight) canvas.height = canvasHeight
 
-      topoData.projection.scale(canvas.width * 1.25).translate([canvas.width / 2, canvas.height / 2])
+      const store = pathCacheStoreRef.current
+      const scopeKey = getPathCacheScopeKey(canvas)
+      const focusKey = focus.id || ''
 
-      // Centers the projection on the focused state
-      if (focus.feature) {
-        const PADDING = 10
-        const fitExtent = [
-          [PADDING, PADDING],
-          [canvas.width - 0, canvas.height - PADDING]
-        ]
-        topoData.projection.fitExtent(fitExtent, focus.feature)
+      // If anything that affects projected pixel coords (besides focus)
+      // changed, drop every per-focus cache.
+      if (store.cacheKey !== scopeKey) {
+        store.caches.clear()
+        store.cacheKey = scopeKey
+        store.currentFocus = null
       }
 
-      const pathCacheKey = getPathCacheKey(canvas)
-      if (geoPathCacheKeyRef.current !== pathCacheKey || geoPathCacheRef.current.size === 0) {
-        buildPathCache(pathCacheKey)
+      if (store.currentFocus !== focusKey) {
+        // The projection is shared and used by canvasHover/canvasClick for
+        // .invert() back to lat/lon, so re-configure it for this focus —
+        // even when we have a cached Path2D set.
+        topoData.projection.scale(canvas.width * 1.25).translate([canvas.width / 2, canvas.height / 2])
+        if (focus.feature) {
+          const PADDING = 10
+          const fitExtent = [
+            [PADDING, PADDING],
+            [canvas.width - 0, canvas.height - PADDING]
+          ]
+          topoData.projection.fitExtent(fitExtent, focus.feature)
+        }
+
+        const cached = store.caches.get(focusKey)
+        if (cached) {
+          geoPathCacheRef.current = cached
+        } else {
+          buildPathCache()
+          store.caches.set(focusKey, geoPathCacheRef.current)
+        }
+        store.currentFocus = focusKey
       }
 
       // Render the map
